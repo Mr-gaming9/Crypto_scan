@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SMC Crypto Scanner — Binance</title>
+<style>
+  body { font-family: Arial, sans-serif; background: #1e1e2e; color: #e0e0e0; padding: 1rem; }
+  h1 { color: #89b4fa; margin: 0 0 .5rem; }
+
+  /* Filter panel with slider */
+  .panel { background: #2a2a3d; border-radius: 10px; padding: 1rem; margin-bottom: 1rem; display: flex; gap: 2rem; flex-wrap: wrap; align-items: end; }
+  .field { display: flex; flex-direction: column; gap: 4px; min-width: 160px; }
+  label { font-size: .8rem; color: #a5b4fc; }
+  input[type=range] { accent-color: #89b4fa; }
+
+  button { padding: .6rem 1.2rem; background: #89b4fa; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; }
+  button:disabled { opacity: .5; cursor: wait; }
+
+  /* Summary cards */
+  .stats { display: flex; gap: 1rem; margin-bottom: .5rem; flex-wrap: wrap; }
+  .card { background: #2a2a3d; padding: .6rem 1rem; border-radius: 8px; min-width: 140px; }
+  .card b { color: #89b4fa; }
+
+  /* Debug line showing what happened */
+  #debug { color: #fbbf24; font-size: .8rem; margin-bottom: .5rem; }
+
+  /* Results table */
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  th, td { padding: .5rem .6rem; text-align: right; border-bottom: 1px solid #3a3a5c; vertical-align: middle; white-space: nowrap; }
+  th { background: #2a2a3d; position: sticky; top: 0; }
+  td:first-child, th:first-child { text-align: left; }
+
+  /* Confidence bar */
+  .bar-bg { background: #3a3a5c; height: 12px; border-radius: 6px; overflow: hidden; width: 80px; display: inline-block; vertical-align: middle; }
+  .bar-fill { height: 100%; border-radius: 6px; }
+
+  /* Badges */
+  .bull { background: #4ade80; color: #000; padding: 3px 8px; border-radius: 6px; font-weight: bold; }
+  .bear { background: #f87171; color: #fff; padding: 3px 8px; border-radius: 6px; font-weight: bold; }
+  .neu  { background: #a5b4fc; color: #000; padding: 3px 8px; border-radius: 6px; font-weight: bold; }
+
+  /* Pattern tags */
+  .tag { font-size: .75rem; padding: 2px 6px; border-radius: 4px; margin-left: 4px; }
+  .tag-bull { background: #22c55e33; color: #4ade80; }
+  .tag-bear { background: #f8717133; color: #f87171; }
+</style>
+</head>
+<body>
+
+<h1>?? SMC Scanner — Binance</h1>
+<p id="status">Click Scan.</p>
+
+<!-- Tunable mover threshold -->
+<div class="panel">
+  <div class="field">
+    <label>Mover threshold: abs(<b id="vM">2</b>%) in 24h</label>
+    <input type="range" id="fM" min="0.5" max="15" value="2" step="0.5" oninput="document.getElementById('vM').textContent=this.value">
+  </div>
+  <button onclick="run()">Scan Movers</button>
+</div>
+
+<div id="debug"></div>
+<div class="stats" id="stats"></div>
+<table>
+  <thead><tr><th>Coin</th><th>Price</th><th>24h %</th><th>Vol ($M)</th><th>RSI(14)</th><th>Patterns</th><th>Confidence</th><th>Prediction</th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+
+<script>
+// Stablecoin symbols to exclude — they don't move, so no setups exist
+var STABLES = ["USDT","USDC","BUSD","TUSD","DAI","FDUSD","FRAX","USDD"];
+
+// Multiple proxy options — we try each one until one works.
+// This is needed because browsers block direct Binance requests (CORS).
+var PROXIES = [
+  "https://api.allorigins.win/raw?url=",
+  "https://corsproxy.io/?",
+  "https://api.codetabs.com/v1/proxy?quest="
+];
+
+async function run() {
+  var btn = document.querySelector("button");
+  var st = document.getElementById("status");
+  var dbg = document.getElementById("debug");
+  btn.disabled = true;
+
+  // --- STAGE 1: fetch all USDT pair 24h stats from Binance --
+  var data = null;
+
+  // Try every proxy in turn, with a short delay between attempts.
+  for (var p = 0; p < PROXIES.length && !data; p++) {
+    st.textContent = "Trying proxy " + (p + 1) + "/" + PROXIES.length + "...";
+    try {
+      var r = await fetch(PROXIES[p] + encodeURIComponent("https://api.binance.com/api/v3/ticker/24hr?symbol=&instrumentType=SPOT"));
+      if (r.ok) data = await r.json();
+    } catch(e) {} // proxy failed — loop tries the next one
+    if (!data && p < PROXIES.length - 1) await new Promise(function(ok){ setTimeout(ok, 3000); });
+  }
+
+  // If all proxies failed, show a clear message with a workaround.
+  if (!data || !Array.isArray(data)) {
+    dbg.textContent = "All proxies blocked.";
+    st.textContent = "? Blocked by CORS. Workaround: install 'CORS Unblock' browser extension (free) and rescan — no proxy needed then.";
+    btn.disabled = false;
+    return;
+  }
+
+  var mThresh = parseFloat(document.getElementById("fM").value);
+
+  // Keep only pairs that moved enough and aren't stablecoins.
+  var movers = data.filter(function(t) {
+    var base = t.symbol.replace("USDT", "");
+    if (STABLES.indexOf(base) !== -1) return false;
+    return Math.abs(parseFloat(t.priceChangePercent)) >= mThresh;
+  });
+
+  // Debug line: shows exactly how many coins survived each filter.
+  dbg.textContent = "Fetched " + data.length + " pairs ? " + movers.length + " movers (threshold " + mThresh + "%)";
+
+  if (!movers.length) { st.textContent = "No movers — lower threshold."; btn.disabled = false; return; }
+
+  // Sort by movement size so biggest plays get candle analysis first.
+  movers.sort(function(a, b) { return Math.abs(parseFloat(b.priceChangePercent)) - Math.abs(parseFloat(a.priceChangePercent)); });
+
+  // Cap at 12 to keep scans fast (~3s each via proxy).
+  var top = movers.slice(0, 12);
+
+  // --- STAGE 2: fetch real 15m candles for pattern detection --
+  var results = [];
+  for (var i = 0; i < top.length; i++) {
+    st.textContent = "Stage 2: analyzing " + (i+1) + "/" + top.length + " — " + top[i].symbol;
+
+    // Try each proxy for the candle data too, but only once per proxy.
+    var klines = null;
+    for (var p = 0; p < PROXIES.length && !klines; p++) {
+      try {
+        var r = await fetch(PROXIES[p] + encodeURIComponent("https://api.binance.com/api/v3/klines?symbol=" + top[i].symbol + "&interval=15m&limit=50"));
+        if (r.ok) klines = await r.json();
+      } catch(e) {}
+    }
+
+    results.push(analyze(top[i], klines)); // Stage 3: RSI + patterns + prediction
+  }
+
+  // Sort by confidence so best setups appear first.
+  results.sort(function(a, b) { return b.confidence - a.confidence; });
+  st.textContent = "Done! " + results.length + " candidates at " + new Date().toLocaleTimeString();
+  drawStats(results);
+  drawTable(results);
+  btn.disabled = false;
+}
+
+// --- STAGE 3: RSI + candle patterns + prediction scoring --
+function analyze(t, klines) {
+  var chg   = parseFloat(t.priceChangePercent); // 24h change %
+  var volM  = parseFloat(t.quoteVolume) / 1e6;  // volume in millions
+
+  // Compute RSI(14) from the real candle closes.
+  var rsi = 50; // neutral default if no candles available
+  try {
+    if (!klines || klines.length < 30) throw "no candles";
+    var gains = 0, losses = 0;
+    for (var i = klines.length - 14; i < klines.length; i++) {
+      // Change = current close minus previous close.
+      var d = parseFloat(klines[i][4]) - parseFloat(klines[Math.max(0,i-1)][4]);
+      if (d > 0) gains += d; else losses -= d;
+    }
+    var ag = gains / 14, al = losses / 14;
+    rsi = al === 0 ? 100 : 100 - (100 / (1 + ag / al)); // standard RSI formula
+  } catch(e) {}
+
+  // Check the last two candles for reversal patterns.
+  var pats = [];
+  try {
+    if (!klines || klines.length < 2) throw "no candles";
+    var k = candle(klines[klines.length - 1]); // current candle
+    var p = candle(klines[klines.length - 2]); // previous candle
+
+    // Hammer: green close, long lower wick (2x+ body), short upper wick — bullish reversal sign.
+    if (k.green && k.body > 0 && k.lw >= 2 * k.body && k.uw < k.lw) {
+      pats.push({ n: "Hammer", c: "tag-bull" });
+    }
+
+    // Bullish engulfing: prior red candle fully swallowed by current green one.
+    if (k.green && !p.green && k.body > p.body && k.open < p.close && k.cl > p.open) {
+      pats.push({ n: "Bull Engulf", c: "tag-bull" });
+    }
+
+    // Bearish inverted hammer: red candle with long upper wick — exhaustion at top.
+    if (!k.green && k.body > 0 && k.uw >= 2 * k.body) {
+      pats.push({ n: "Inv Hammer", c: "tag-bear" });
+    }
+  } catch(e) {}
+
+  // Score the setup: momentum + RSI extreme bonus + pattern bonus.
+  var score = chg * 0.5;
+  if (rsi < 30 && chg > 0)   score += 4; // oversold bounce — Scenario B play!
+  if (rsi > 70 && chg < 0)   score -= 4; // overbought rejection
+  pats.forEach(function(p) { score += (p.n.indexOf("Bull") !== -1 || p.n === "Hammer") ? 3 : -3; });
+
+  var confidence = Math.min(100, Math.abs(score) * 7);
+
+  // Final prediction based on score strength and a confidence floor.
+  var pred, pcls;
+  if (score > 4 && confidence > 35)     { pred = "?? Bullish"; pcls = "bull"; }
+  else if (score < -4 && confidence > 35){ pred = "?? Bearish"; pcls = "bear"; }
+  else                                  { pred = "? Neutral"; pcls = "neu"; }
+
+  return { name: t.symbol.replace("USDT",""), price: parseFloat(t.lastPrice), chg: chg, volM: volM, rsi: rsi, patterns: pats, confidence: confidence, pred: pred, pcls: pcls };
+}
+
+// Helper: unpack a Binance candle [time,o,h,l,c,v] into readable fields.
+function candle(k) {
+  var o = parseFloat(k[1]), h = parseFloat(k[2]), l = parseFloat(k[3]), cl = parseFloat(k[4]);
+  return { open: o, cl: cl, green: cl > o, body: Math.abs(cl - o), lw: Math.min(o,cl) - l, uw: h - Math.max(o,cl) };
+}
+
+// Summary cards counting each prediction type.
+function drawStats(list) {
+  var s = { bull: 0, bear: 0, neu: 0 };
+  list.forEach(function(r) { if (r.pcls === "bull") s.bull++; else if (r.pcls === "bear") s.bear++; else s.neu++; });
+  document.getElementById("stats").innerHTML = '<div class="card"><b>?? Bullish:</b> '+s.bull+'</div><div class="card"><b>?? Bearish:</b> '+s.bear+'</div><div class="card"><b>? Neutral:</b> '+s.neu+'</div>';
+}
+
+// Build table rows with pattern tags and a confidence bar per coin.
+function drawTable(list) {
+  var tbody = document.getElementById("rows");
+  tbody.innerHTML = "";
+  list.forEach(function(r) {
+    var tr = document.createElement("tr");
+    var bc = r.pcls === "bull" ? "#4ade80" : r.pcls === "bear" ? "#f87171" : "#a5b4fc";
+
+    // Join pattern tags as small colored labels.
+    var ph = r.patterns.map(function(p){ return '<span class="tag '+p.c+'">'+p.n+'</span>'; }).join("");
+
+    tr.innerHTML = '<td>'+r.name+'</td><td>$'+fmt(r.price)+'</td>' +
+      '<td style="color:'+(r.chg>=0?"#4ade80":"#f87171")+'">'+r.chg.toFixed(2)+"%</td>" +
+      '<td>'+r.volM.toFixed(1)+"M</td><td>"+Math.round(r.rsi)+'</td>' +
+      '<td>'+(ph||"&#8212;")+'</td>' +
+      '<td><div class="bar-bg"><div class="bar-fill" style="width:'+r.confidence+'%;background:'+bc+'"></div> '+Math.round(r.confidence)+"%</div></td>" +
+      '<td><span class="'+r.pcls+'">'+r.pred+'</span></td>';
+
+    tbody.appendChild(tr);
+  });
+}
+
+function fmt(n) { return n >= 1000 ? (n/1000).toFixed(1)+"K" : n < 1 ? n.toFixed(4) : n.toFixed(2); }
+</script>
+</body>
+</html>
