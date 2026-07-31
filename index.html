@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>SMC Scanner — Polygon.io</title>
+<title>SMC Scanner — Binance Candles</title>
 <style>
   body { font-family: Arial, sans-serif; background: #1e1e2e; color: #e0e0e0; padding: 1rem; }
   h1 { color: #89b4fa; margin: 0 0 .5rem; }
@@ -97,7 +97,7 @@
 </head>
 <body>
 
-<h1>🔍 SMC Scanner — Polygon.io (Real Candles)</h1>
+<h1>🔍 SMC Scanner — Binance Candles (Real Data)</h1>
 <p id="status">Click Scan to find the movers.</p>
 
 <!-- ─── HEADER FILTERS ──────────────────────────────── -->
@@ -230,29 +230,30 @@ async function run() {
 
   log("Stage 1: " + data.length + " coins → " + top.length + " selected for deep analysis", false);
 
-  // ─── STAGE 2: technical analysis — real hourly candles via Polygon.io ──
-  st.textContent = "Stage 2: analyzing candles (Polygon.io)...";
+  // ─── STAGE 2: technical analysis — real hourly candles from Binance ──
+  st.textContent = "Stage 2: fetching candle data (Binance)...";
   var results = [];
 
   for (var i = 0; i < top.length; i++) {
     log("Stage 2: fetching OHLC for #" + (i+1) + "/" + top.length + " — " + top[i].name + " (" + top[i].id + ")", false);
 
-    // Polygon.io OHLC endpoint returns hourly candlesticks.
-    // Format: { results: [ { t, o, h, l, c, v }, ... ] }
+    // Binance klines endpoint returns [timestamp, open, high, low, close, volume] arrays.
+    // We map the CoinGecko symbol to a Binance USDT pair (e.g., MANTIS → MANTISUSDT).
+    var sym = (top[i].symbol || "").toUpperCase() + "USDT";
+    log("  Calling Binance /api/v3/klines?symbol=" + sym + "&interval=1h&limit=50", false);
+
     var ohlc = null;
     try {
-      log("  Calling Polygon /v2/aggs/ticker/X:" + (top[i].symbol||"").toUpperCase() + "/USD/range/1h/" + top.length + "bars?adjusted=true", false);
-      var r2 = await fetch("https://api.polygon.io/v2/aggs/ticker/X:" + (top[i].symbol||"").toUpperCase() + "/USD/range/1h/" + Math.min(top.length, 50) + "bars?adjusted=true&sort=asc");
+      var r2 = await fetch("https://api.binance.com/api/v3/klines?symbol=" + sym + "&interval=1h&limit=50");
       if (r2.ok) {
-        var polygonData = await r2.json();
-        ohlc = polygonData.results || []; // array of {t,o,h,l,c,v} objects.
-        log("  Polygon returned: " + (ohlc ? ohlc.length + " candles" : "null"), false);
+        ohlc = await r2.json(); // array of [ts, o, h, l, c, v] arrays.
+        log("  Binance returned: " + (ohlc ? ohlc.length + " candles" : "null"), false);
       } else {
         var errText = await r2.text();
-        log("  Polygon API error — status " + r2.status + ": " + errText.substring(0, 150), true);
+        log("  Binance API error — status " + r2.status + ": " + errText.substring(0, 150), true);
       }
     } catch(e) {
-      log("  Polygon fetch error — " + e.message, true);
+      log("  Binance fetch error — " + e.message, true);
     }
 
     // Analyze this coin.
@@ -268,8 +269,8 @@ async function run() {
 
     results.push(result);
 
-    // Small pause between calls to stay polite to the API (5/min limit).
-    await new Promise(function(ok){ setTimeout(ok, 13000); }); // ~13s = ~4.6 calls/min, under Polygon's free tier.
+    // Small pause between calls to stay polite to the API.
+    await new Promise(function(ok){ setTimeout(ok, 600); });
   }
 
   log("Stage 2: complete — " + results.length + " coins analyzed", false);
@@ -296,7 +297,8 @@ function analyze(c, ohlc) {
     // Compute RSI(14) from hourly closes: average gain vs average loss over last 14 bars.
     var gains = 0, losses = 0;
     for (var i = ohlc.length - 14; i < ohlc.length; i++) {
-      var d = parseFloat(ohlc[i].c) - parseFloat(ohlc[Math.max(0,i-1)].c); // change from prior close.
+      // Binance format is [timestamp, open, high, low, close, volume] — index 4 is the close.
+      var d = parseFloat(ohlc[i][4]) - parseFloat(ohlc[Math.max(0,i-1)][4]); // change from prior close.
       if (d > 0) gains += d; else losses -= d;
     }
     var ag = gains / 14, al = losses / 14;
@@ -322,14 +324,14 @@ function analyze(c, ohlc) {
     }
 
     // ─── SWEEP DETECTION from hourly high/low ──────────────
-    var h24 = Math.max.apply(null, ohlc.slice(-24).map(function(x){ return parseFloat(x.h); })); // 24h high.
-    var l24 = Math.min.apply(null, ohlc.slice(-24).map(function(x){ return parseFloat(x.l); })); // 24h low.
-    var price = parseFloat(ohlc[ohlc.length - 1].c); // current close.
+    var h24 = Math.max.apply(null, ohlc.slice(-24).map(function(x){ return parseFloat(x[2]); })); // 24h high.
+    var l24 = Math.min.apply(null, ohlc.slice(-24).map(function(x){ return parseFloat(x[3]); })); // 24h low.
+    var price = parseFloat(ohlc[ohlc.length - 1][4]); // current close.
 
     // Baseline: average of closes from 48-72 hours ago as a reference level.
     var older = ohlc.slice(-72, -48);
     if (older.length > 0) {
-      var avgOlder = older.reduce(function(s,v){ return s + parseFloat(v.c); }, 0) / older.length;
+      var avgOlder = older.reduce(function(s,v){ return s + parseFloat(v[4]); }, 0) / older.length;
 
       // Bullish sweep: price dipped below the older average then recovered above it — stop hunt reversal.
       if (l24 < avgOlder && price > avgOlder && chg > 0) pats.push({ n: "🔵 Bull Sweep", c: "tag-bull" });
@@ -342,7 +344,7 @@ function analyze(c, ohlc) {
     if (recent.length >= 12) {
       var ups = 0;
       for (var j = recent.length - 12; j < recent.length; j++) {
-        if (parseFloat(recent[j].c) > parseFloat(recent[Math.max(0,j-1)].c)) ups++;
+        if (parseFloat(recent[j][4]) > parseFloat(recent[Math.max(0,j-1)][4])) ups++;
       }
       // RSI-style momentum: how many of the last 12 hourly bars went up.
       var mom = Math.round((ups / 12) * 100);
@@ -354,22 +356,22 @@ function analyze(c, ohlc) {
     // ─── SUPPLEMENTARY INDICATORS from hourly data ──────
     var atrSum = 0;
     for (var i = ohlc.length - 14; i < ohlc.length; i++) {
-      var h = parseFloat(ohlc[i].h), l = parseFloat(ohlc[i].l);
-      var prevClose = parseFloat(ohlc[Math.max(0,i-1)].c);
+      var h = parseFloat(ohlc[i][2]), l = parseFloat(ohlc[i][3]);
+      var prevClose = parseFloat(ohlc[Math.max(0,i-1)][4]);
       atrSum += Math.max(h - l, Math.abs(h - prevClose), Math.abs(l - prevClose));
     }
     atrVal = atrSum / 14;
 
     // Stochastic %K: (close - lowN) / (highN - lowN).
-    var hN = Math.max.apply(null, ohlc.slice(-20).map(function(x){ return parseFloat(x.h); }));
-    var lN = Math.min.apply(null, ohlc.slice(-20).map(function(x){ return parseFloat(x.l); }));
+    var hN = Math.max.apply(null, ohlc.slice(-20).map(function(x){ return parseFloat(x[2]); }));
+    var lN = Math.min.apply(null, ohlc.slice(-20).map(function(x){ return parseFloat(x[3]); }));
     stochK = (hN === lN) ? 50 : ((price - lN) / (hN - lN)) * 100;
 
     // MACD proxy: EMA(9) vs EMA(26) of closes.
     var ema9 = emaCalc(ohlc, 9), ema26 = emaCalc(ohlc, 26);
     macdSignal = ((ema9 - ema26) / price) * 100; // normalized as % for readability.
 
-    return { name: c.name + " (" + (c.symbol||"").toUpperCase() + ")", img: c.image || "", price: c.current_price, chg: chg, volM: volM, rsi: Math.round(rsi), patterns: pats, confidence: 0, pred: null, sparkData: ohlc.slice(-24).map(function(x){ return parseFloat(x.c); }),
+    return { name: c.name + " (" + (c.symbol||"").toUpperCase() + ")", img: c.image || "", price: c.current_price, chg: chg, volM: volM, rsi: Math.round(rsi), patterns: pats, confidence: 0, pred: null, sparkData: ohlc.slice(-24).map(function(x){ return parseFloat(x[4]); }),
              atr: atrVal.toFixed(3), stochK: Math.round(stochK), macdSignal: macdSignal.toFixed(1), h24: price.toFixed(4), l24: l24.toFixed(4) };
   }
 
@@ -380,17 +382,17 @@ function analyze(c, ohlc) {
 // Simple EMA helper for MACD calculation.
 function emaCalc(data, period) {
   var k = 2 / (period + 1);
-  var prevClose = parseFloat(data[data.length - period].c); // SMA as initial value.
+  var prevClose = parseFloat(data[data.length - period][4]); // SMA as initial value.
   for (var i = data.length - period; i < data.length; i++) {
-    var c = parseFloat(data[i].c);
+    var c = parseFloat(data[i][4]);
     prevClose = k * c + (1 - k) * prevClose;
   }
   return prevClose;
 }
 
-// Helper: unpack a candle object {t,o,h,l,c,v} into readable fields for pattern math.
+// Helper: unpack a candle [ts,o,h,l,c,v] into readable fields for pattern math.
 function candle(k) {
-  var o = parseFloat(k.o), h = parseFloat(k.h), l = parseFloat(k.l), cl = parseFloat(k.c);
+  var o = parseFloat(k[1]), h = parseFloat(k[2]), l = parseFloat(k[3]), cl = parseFloat(k[4]);
   return { open: o, cl: cl, green: cl > o, body: Math.abs(cl - o), lw: Math.min(o,cl) - l, uw: h - Math.max(o,cl) };
 }
 
