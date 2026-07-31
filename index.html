@@ -8,13 +8,14 @@
   body { font-family: Arial, sans-serif; background: #1e1e2e; color: #e0e0e0; padding: 1rem; }
   h1 { color: #89b4fa; margin: 0 0 .5rem; }
 
-  /* Filter panel with slider */
-  .panel { background: #2a2a3d; border-radius: 10px; padding: 1rem; margin-bottom: 1rem; display: flex; gap: 2rem; flex-wrap: wrap; align-items: end; }
+  /* Header with filter controls */
+  .header { background: #2a2a3d; border-radius: 10px; padding: 1rem; margin-bottom: 1rem; display: flex; gap: 1.5rem; flex-wrap: wrap; align-items: end; }
   .field { display: flex; flex-direction: column; gap: 4px; min-width: 160px; }
   label { font-size: .8rem; color: #a5b4fc; }
-  input[type=range] { accent-color: #89b4fa; }
 
-  button { padding: .6rem 1.2rem; background: #89b4fa; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; }
+  select, button { padding: .5rem .8rem; background: #3a3a5c; border: 1px solid #4a4a7c; border-radius: 6px; cursor: pointer; font-weight: bold; color: #e0e0e0; }
+  select:focus { outline: none; border-color: #89b4fa; }
+  button { background: #89b4fa; border: none; }
   button:disabled { opacity: .5; cursor: wait; }
 
   /* Summary cards */
@@ -25,11 +26,15 @@
   /* Debug line */
   #debug { color: #fbbf24; font-size: .8rem; margin-bottom: .5rem; }
 
-  /* Results table */
+  /* Results table with inline chart */
   table { width: 100%; border-collapse: collapse; font-size: .9rem; }
   th, td { padding: .5rem .6rem; text-align: right; border-bottom: 1px solid #3a3a5c; vertical-align: middle; white-space: nowrap; }
-  th { background: #2a2a3d; position: sticky; top: 0; }
+  th { background: #2a2a3d; position: sticky; top: 0; cursor: pointer; user-select: none; }
   td:first-child, th:first-child { text-align: left; }
+
+  /* Sparkline chart inside table cell */
+  .chart-cell { width: 140px; }
+  canvas.chart { display: block; margin: auto; border-radius: 6px; background: #2a2a3d; }
 
   /* Confidence bar */
   .bar-bg { background: #3a3a5c; height: 12px; border-radius: 6px; overflow: hidden; width: 80px; display: inline-block; vertical-align: middle; }
@@ -51,21 +56,48 @@
 <body>
 
 <h1>🔍 SMC Scanner — 2-Stage (Real Candles)</h1>
-<p id="status">Click Scan. Stage 2 fetches hourly candles per coin.</p>
+<p id="status">Click Scan to find the movers.</p>
 
-<!-- Tunable mover threshold -->
-<div class="panel">
+<!-- ─── HEADER FILTERS ──────────────────────────────── -->
+<div class="header">
+  <div class="field">
+    <label>Crypto Type</label>
+    <select id="fType">
+      <option value="spot" selected>Spot (USDT pairs)</option>
+      <option value="derivatives">Derivatives / Perps</option>
+      <option value="all">All Markets</option>
+    </select>
+  </div>
+
+  <div class="field">
+    <label>Stablecoins</label>
+    <select id="fStable">
+      <option value="exclude" selected>Exclude from results</option>
+      <option value="include">Include in results</option>
+    </select>
+  </div>
+
   <div class="field">
     <label>Mover threshold: abs(<b id="vM">3</b>%) in 24h</label>
     <input type="range" id="fM" min="0.5" max="15" value="3" step="0.5" oninput="document.getElementById('vM').textContent=this.value">
   </div>
+
+  <div class="field">
+    <label>Max results</label>
+    <select id="fCount">
+      <option value="10">10 coins</option>
+      <option value="20" selected>20 coins</option>
+      <option value="35">35 coins</option>
+    </select>
+  </div>
+
   <button onclick="run()">Scan Movers</button>
 </div>
 
 <div id="debug"></div>
 <div class="stats" id="stats"></div>
 <table>
-  <thead><tr><th>Coin</th><th>Price</th><th>24h %</th><th>Vol ($M)</th><th>RSI(14)</th><th>Patterns</th><th>Confidence</th><th>Prediction</th></tr></thead>
+  <thead><tr><th>Coin</th><th>Price</th><th>24h %</th><th>Vol ($M)</th><th>RSI(14)</th><th>Chart</th><th>Patterns</th><th>Confidence</th><th>Prediction</th></tr></thead>
   <tbody id="rows"></tbody>
 </table>
 
@@ -79,14 +111,19 @@ async function run() {
   var dbg = document.getElementById("debug");
   btn.disabled = true;
 
-  // ─── STAGE 1: gross pick — fast overview of top 250 coins ──
+  // Read filter values.
+  var mThresh   = parseFloat(document.getElementById("fM").value);
+  var excludeSt = document.getElementById("fStable").value === "exclude";
+  var maxCount  = parseInt(document.getElementById("fCount").value);
+
+  // ─── STAGE 1: gross pick — fast overview of top coins ──
   st.textContent = "Stage 1: fetching movers...";
   var data = null;
 
-  // Retry up to 3 times with a delay — handles rate limits gracefully.
   for (var a = 1; a <= 3 && !data; a++) {
     try {
-      var r = await fetch("https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=1");
+      // CoinGecko /coins/markets with sparkline=7d gives us hourly price history.
+      var r = await fetch("https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=1&sparkline=7d");
       if (r.ok) data = await r.json();
     } catch(e) {}
     if (!data && a < 3) await new Promise(function(ok){ setTimeout(ok, 10000); });
@@ -94,20 +131,20 @@ async function run() {
 
   if (!data || !Array.isArray(data)) { st.textContent = "❌ CoinGecko unavailable after 3 tries."; btn.disabled = false; return; }
 
-  var mThresh = parseFloat(document.getElementById("fM").value);
-
-  // Keep only non-stablecoins that moved enough.
+  // Filter: remove stablecoins unless user wants them.
   var movers = data.filter(function(c) {
-    var name = c.name.toLowerCase();
-    for (var i = 0; i < STABLES.length; i++) if (name.indexOf(STABLES[i]) !== -1) return false;
+    if (excludeSt) {
+      var name = c.name.toLowerCase();
+      for (var i = 0; i < STABLES.length; i++) if (name.indexOf(STABLES[i]) !== -1) return false;
+    }
     return Math.abs(parseFloat(c.price_change_percentage_24h || 0)) >= mThresh;
   });
 
-  // Sort biggest movers first, cap at 15 so Stage 2 stays fast.
+  // Sort biggest movers first, cap at user's max count.
   movers.sort(function(a, b) { return Math.abs(parseFloat(b.price_change_percentage_24h||0)) - Math.abs(parseFloat(a.price_change_percentage_24h||0)); });
-  var top = movers.slice(0, 15);
+  var top = movers.slice(0, maxCount);
 
-  dbg.textContent = "Stage 1: fetched " + data.length + " coins → " + top.length + " movers selected for deep analysis.";
+  dbg.textContent = "Stage 1: fetched " + data.length + " coins → " + top.length + " selected for deep analysis.";
 
   // ─── STAGE 2: technical analysis — real hourly candles per coin ──
   st.textContent = "Stage 2: analyzing candles...";
@@ -120,7 +157,7 @@ async function run() {
     var ohlc = null;
     try {
       var r2 = await fetch("https://api.coingecko.com/api/v3/coin/" + top[i].id + "/ohlc?vs_currency=usd");
-      if (r2.ok) ohlc = await r2.json(); // array of [ts, o, h, l, c] rows
+      if (r2.ok) ohlc = await r2.json(); // array of [ts, o, h, l, c] rows.
     } catch(e) {}
 
     results.push(analyze(top[i], ohlc)); // Stage 3: RSI + patterns + prediction.
@@ -147,7 +184,8 @@ function analyze(c, ohlc) {
     // Compute RSI(14) from hourly closes: average gain vs average loss over last 14 bars.
     var gains = 0, losses = 0;
     for (var i = ohlc.length - 14; i < ohlc.length; i++) {
-      var d = parseFloat(ohlc[i][4]) - parseFloat(ohlc[Math.max(0,i-1)][4]); // close minus prior close.
+      // OHLC format is [timestamp, open, high, low, close] — index 4 is the close.
+      var d = parseFloat(ohlc[i][4]) - parseFloat(ohlc[Math.max(0,i-1)][4]); // change from prior close.
       if (d > 0) gains += d; else losses -= d;
     }
     var ag = gains / 14, al = losses / 14;
@@ -177,11 +215,30 @@ function analyze(c, ohlc) {
     var l24 = Math.min.apply(null, ohlc.slice(-24).map(function(x){ return parseFloat(x[3]); })); // 24h low.
     var price = parseFloat(ohlc[ohlc.length - 1][4]); // current close.
 
-    // Bullish sweep: price dipped below the 48h average then recovered above it — stop hunt reversal.
-    if (l24 < ohlc[-49]) { /* simplified check below */ }
-    var older = parseFloat(ohlc[ohlc.length - 48][4]); // close from 48h ago as baseline.
-    if (l24 < older && price > older && chg > 0) pats.push({ n: "🔵 Bull Sweep", c: "tag-bull" });
-    if (h24 > older && price < older && chg < 0) pats.push({ n: "🔴 Bear Sweep", c: "tag-bear" });
+    // Baseline: average of closes from 48-72 hours ago as a reference level.
+    var older = ohlc.slice(-72, -48);
+    if (older.length > 0) {
+      var avgOlder = older.reduce(function(s,v){ return s + parseFloat(v[4]); }, 0) / older.length;
+
+      // Bullish sweep: price dipped below the older average then recovered above it — stop hunt reversal.
+      if (l24 < avgOlder && price > avgOlder && chg > 0) pats.push({ n: "🔵 Bull Sweep", c: "tag-bull" });
+      // Bearish sweep: pumped above older average then faded back below — liquidity raid rejection.
+      if (h24 > avgOlder && price < avgOlder && chg < 0) pats.push({ n: "🔴 Bear Sweep", c: "tag-bear" });
+    }
+
+    // ─── MOMENTUM FLAGS from hourly data ──────────────────
+    var recent = ohlc.slice(-24); // last 24h candles.
+    if (recent.length >= 12) {
+      var ups = 0;
+      for (var j = recent.length - 12; j < recent.length; j++) {
+        if (parseFloat(recent[j][4]) > parseFloat(recent[Math.max(0,j-1)][4])) ups++;
+      }
+      // RSI-style momentum: how many of the last 12 hourly bars went up.
+      var mom = Math.round((ups / 12) * 100);
+
+      if (mom > 85 && chg > 0) pats.push({ n: "🟢 Strong Momentum", c: "tag-bull" });
+      if (mom < 15 && chg < 0) pats.push({ n: "🔴 Weak Momentum", c: "tag-bear" });
+    }
   }
 
   // Score the setup: momentum + RSI extremes + pattern bonuses.
@@ -198,7 +255,10 @@ function analyze(c, ohlc) {
   else if (score < -5 && confidence > 35){ pred = "🔴 Bearish"; pcls = "bear"; }
   else                                  { pred = "⚪ Neutral"; pcls = "neu"; }
 
-  return { name: c.name + " (" + c.symbol.toUpperCase() + ")", img: c.image || "", price: c.current_price, chg: chg, volM: volM, rsi: Math.round(rsi), patterns: pats, confidence: confidence, pred: pred, pcls: pcls };
+  // Extract the last 24 hourly prices for chart rendering.
+  var sparkData = ohlc ? ohlc.slice(-24).map(function(x){ return parseFloat(x[4]); }) : [];
+
+  return { name: c.name + " (" + c.symbol.toUpperCase() + ")", img: c.image || "", price: c.current_price, chg: chg, volM: volM, rsi: Math.round(rsi), patterns: pats, confidence: confidence, pred: pred, pcls: pcls, sparkData: sparkData };
 }
 
 // Helper: unpack a candle [ts,o,h,l,c] into readable fields for pattern math.
@@ -214,11 +274,48 @@ function drawStats(list) {
   document.getElementById("stats").innerHTML = '<div class="card"><b>🟢 Bullish:</b> '+s.bull+'</div><div class="card"><b>🔴 Bearish:</b> '+s.bear+'</div><div class="card"><b>⚪ Neutral:</b> '+s.neu+'</div>';
 }
 
+// Draw a tiny sparkline chart on canvas for each coin.
+function drawChart(canvas, data, color) {
+  if (!data || !data.length) return; // nothing to draw.
+
+  var w = canvas.width, h = canvas.height;
+  var ctx = canvas.getContext("2d");
+
+  // Clear the canvas.
+  ctx.clearRect(0, 0, w, h);
+
+  // Find min/max for scaling.
+  var mn = Math.min.apply(null, data), mx = Math.max.apply(null, data);
+  if (mx === mn) { mx = mn + 1; } // avoid divide-by-zero.
+
+  // Draw the line path.
+  ctx.beginPath();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  for (var i = 0; i < data.length; i++) {
+    var x = (i / (data.length - 1)) * w;
+    var y = h - ((data[i] - mn) / (mx - mn)) * (h - 4); // leave some padding.
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Fill under the line with a gradient for visual polish.
+  var grad = ctx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, color + "33"); // semi-transparent fill.
+  grad.addColorStop(1, "transparent");
+
+  ctx.lineTo(w, h);
+  ctx.lineTo(0, h);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+}
+
 // Build table rows with pattern tags and a confidence bar per coin.
 function drawTable(list) {
   var tbody = document.getElementById("rows");
   tbody.innerHTML = "";
-  list.forEach(function(r) {
+  list.forEach(function(r, idx) {
     var tr = document.createElement("tr");
     var bc = r.pcls === "bull" ? "#4ade80" : r.pcls === "bear" ? "#f87171" : "#a5b4fc";
 
@@ -229,11 +326,18 @@ function drawTable(list) {
       '<td>$'+fmt(r.price)+'</td>' +
       '<td style="color:'+(r.chg>=0?"#4ade80":"#f87171")+'">'+r.chg.toFixed(2)+"%</td>" +
       '<td>'+r.volM.toFixed(1)+"M</td><td>"+r.rsi+'</td>' +
+      '<td class="chart-cell"><canvas id="c'+idx+'" class="chart" width="140" height="50"></canvas></td>' +
       '<td>'+(ph||"&#8212;")+'</td>' +
       '<td><div class="bar-bg"><div class="bar-fill" style="width:'+r.confidence+'%;background:'+bc+'"></div> '+Math.round(r.confidence)+"%</div></td>" +
       '<td><span class="'+r.pcls+'">'+r.pred+'</span></td>';
 
     tbody.appendChild(tr);
+
+    // Draw the sparkline chart after the row is inserted into DOM.
+    if (r.sparkData && r.sparkData.length > 1) {
+      var cvs = document.getElementById("c" + idx);
+      drawChart(cvs, r.sparkData, bc);
+    }
   });
 }
 
