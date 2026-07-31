@@ -24,7 +24,7 @@
   .card b { color: #89b4fa; }
 
   /* Debug line */
-  #debug { color: #fbbf24; font-size: .8rem; margin-bottom: .5rem; }
+  #debug { color: #fbbf24; font-size: .8rem; margin-bottom: .5rem; white-space: pre-wrap; max-height: 100px; overflow-y: auto; background: #1e1e2e; padding: .5rem; border-radius: 6px; }
 
   /* Results table with inline chart */
   table { width: 100%; border-collapse: collapse; font-size: .9rem; }
@@ -90,11 +90,14 @@
   .market-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: .5rem; margin-top: .5rem; }
   .mstat { background: #3a3a5c; padding: .6rem; border-radius: 6px; text-align: center; }
   .mstat b { display: block; color: #89b4fa; font-size: .8rem; }
+
+  /* Error styling */
+  .err { color: #f87171; }
 </style>
 </head>
 <body>
 
-<h1>🔍 SMC Scanner — Full Analysis</h1>
+<h1>🔍 SMC Scanner — Full Analysis (Debug)</h1>
 <p id="status">Click Scan to find the movers.</p>
 
 <!-- ─── HEADER FILTERS ──────────────────────────────── -->
@@ -124,9 +127,9 @@
   <div class="field">
     <label>Max results</label>
     <select id="fCount">
-      <option value="10">10 coins</option>
-      <option value="20" selected>20 coins</option>
-      <option value="35">35 coins</option>
+      <option value="5">5 coins</option>
+      <option value="10" selected>10 coins</option>
+      <option value="20">20 coins</option>
     </select>
   </div>
 
@@ -172,31 +175,44 @@
 // Stablecoin name fragments to exclude from scanning.
 var STABLES = ["dollar","usdt","usdc","busd","tusd","dai","frax","fdusd"];
 
+var DEBUG_LOG = []; // collect all debug messages for display.
+
+function log(msg, isError) {
+  var ts = new Date().toLocaleTimeString();
+  DEBUG_LOG.push((isError ? "[ERR] " : "[OK] ") + msg);
+  document.getElementById("debug").textContent = DEBUG_LOG.join("\n");
+}
+
 async function run() {
   var btn = document.querySelector("button");
   var st = document.getElementById("status");
-  var dbg = document.getElementById("debug");
   btn.disabled = true;
+  DEBUG_LOG = []; // clear previous logs.
+
+  log("=== SCAN STARTED ===", false);
 
   // Read filter values.
   var mThresh   = parseFloat(document.getElementById("fM").value);
   var excludeSt = document.getElementById("fStable").value === "exclude";
   var maxCount  = parseInt(document.getElementById("fCount").value);
 
+  log("Filters: threshold=" + mThresh + "%, exclude_stables=" + excludeSt + ", max_results=" + maxCount, false);
+
   // ─── STAGE 1: gross pick — fast overview of top coins ──
   st.textContent = "Stage 1: fetching movers...";
+  log("Stage 1: calling CoinGecko /coins/markets...", false);
   var data = null;
 
   for (var a = 1; a <= 3 && !data; a++) {
     try {
-      // CoinGecko /coins/markets with sparkline=7d gives us hourly price history.
-      var r = await fetch("https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=1&sparkline=7d");
-      if (r.ok) data = await r.json();
-    } catch(e) {}
+      var r = await fetch("https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=1");
+      if (r.ok) { data = await r.json(); log("Stage 1: fetched " + data.length + " coins", false); break; }
+      else { log("Stage 1: API returned status " + r.status, true); }
+    } catch(e) { log("Stage 1: fetch error — " + e.message, true); }
     if (!data && a < 3) await new Promise(function(ok){ setTimeout(ok, 10000); });
   }
 
-  if (!data || !Array.isArray(data)) { st.textContent = "❌ CoinGecko unavailable after 3 tries."; btn.disabled = false; return; }
+  if (!data || !Array.isArray(data)) { st.textContent = "❌ CoinGecko unavailable after 3 tries."; log("Stage 1: FAILED — no data", true); btn.disabled = false; return; }
 
   // Filter: remove stablecoins unless user wants them.
   var movers = data.filter(function(c) {
@@ -211,29 +227,52 @@ async function run() {
   movers.sort(function(a, b) { return Math.abs(parseFloat(b.price_change_percentage_24h||0)) - Math.abs(parseFloat(a.price_change_percentage_24h||0)); });
   var top = movers.slice(0, maxCount);
 
-  dbg.textContent = "Stage 1: fetched " + data.length + " coins → " + top.length + " selected for deep analysis.";
+  log("Stage 1: " + data.length + " coins → " + top.length + " selected for deep analysis", false);
 
   // ─── STAGE 2: technical analysis — real hourly candles per coin ──
   st.textContent = "Stage 2: analyzing candles...";
   var results = [];
 
   for (var i = 0; i < top.length; i++) {
-    st.textContent = "Stage 2: " + (i+1) + "/" + top.length + " — " + top[i].name;
+    log("Stage 2: fetching OHLC for #" + (i+1) + "/" + top.length + " — " + top[i].name + " (" + top[i].id + ")", false);
 
     // OHLC endpoint returns hourly candlesticks as arrays of [timestamp, open, high, low, close].
     var ohlc = null;
     try {
       var r2 = await fetch("https://api.coingecko.com/api/v3/coin/" + top[i].id + "/ohlc?vs_currency=usd");
-      if (r2.ok) ohlc = await r2.json(); // array of [ts, o, h, l, c] rows.
-    } catch(e) {}
+      if (r2.ok) {
+        ohlc = await r2.json();
+        log("  OHLC fetched: " + (ohlc ? ohlc.length + " candles" : "null"), false);
+      } else {
+        log("  OHLC API returned status " + r2.status, true);
+      }
+    } catch(e) {
+      log("  OHLC fetch error — " + e.message, true);
+    }
 
-    results.push(analyze(top[i], ohlc)); // Stage 3: RSI + patterns + prediction.
-    await new Promise(function(ok){ setTimeout(ok, 600); }); // small pause between calls to stay polite to the API.
+    // Analyze this coin.
+    var result = null;
+    try {
+      result = analyze(top[i], ohlc);
+      log("  Analysis complete: RSI=" + (result.rsi || "?") + ", patterns=" + (result.patterns ? result.patterns.length : "null"), false);
+    } catch(e) {
+      log("  Analysis ERROR for " + top[i].name + " — " + e.message, true);
+      // Create a minimal fallback so we don't lose the coin entirely.
+      result = { name: top[i].name + " (" + (top[i].symbol||"").toUpperCase() + ")", img: top[i].image || "", price: top[i].current_price, chg: parseFloat(top[i].price_change_percentage_24h||0), volM: 0, rsi: "?", patterns: [], confidence: 10, pred: null, sparkData: [], atr: "—", stochK: "—", macdSignal: "—", h24: "—", l24: "—" };
+    }
+
+    results.push(result);
+
+    // Small pause between calls to stay polite to the API.
+    await new Promise(function(ok){ setTimeout(ok, 600); });
   }
 
+  log("Stage 2: complete — " + results.length + " coins analyzed", false);
+
   // Sort by confidence so best setups rise to the top.
-  results.sort(function(a, b) { return b.confidence - a.confidence; });
+  results.sort(function(a, b) { return (b.confidence||0) - (a.confidence||0); });
   st.textContent = "Done! " + results.length + " candidates at " + new Date().toLocaleTimeString();
+
   drawStats(results);
   drawTable(results);
   btn.disabled = false;
@@ -326,12 +365,12 @@ function analyze(c, ohlc) {
     var ema9 = emaCalc(ohlc, 9), ema26 = emaCalc(ohlc, 26);
     macdSignal = ((ema9 - ema26) / price) * 100; // normalized as % for readability.
 
-    return { name: c.name + " (" + c.symbol.toUpperCase() + ")", img: c.image || "", price: c.current_price, chg: chg, volM: volM, rsi: Math.round(rsi), patterns: pats, confidence: 0, pred: null, sparkData: ohlc.slice(-24).map(function(x){ return parseFloat(x[4]); }),
+    return { name: c.name + " (" + (c.symbol||"").toUpperCase() + ")", img: c.image || "", price: c.current_price, chg: chg, volM: volM, rsi: Math.round(rsi), patterns: pats, confidence: 0, pred: null, sparkData: ohlc.slice(-24).map(function(x){ return parseFloat(x[4]); }),
              atr: atrVal.toFixed(3), stochK: Math.round(stochK), macdSignal: macdSignal.toFixed(1), h24: price.toFixed(4), l24: l24.toFixed(4) };
   }
 
   // No candle data — return a neutral result so the coin still shows up.
-  return { name: c.name + " (" + c.symbol.toUpperCase() + ")", img: c.image || "", price: c.current_price, chg: chg, volM: volM, rsi: "—", patterns: [], confidence: 20, pred: null, sparkData: [], atr: "—", stochK: "—", macdSignal: "—", h24: "—", l24: "—" };
+  return { name: c.name + " (" + (c.symbol||"").toUpperCase() + ")", img: c.image || "", price: c.current_price, chg: chg, volM: volM, rsi: "—", patterns: [], confidence: 20, pred: null, sparkData: [], atr: "—", stochK: "—", macdSignal: "—", h24: "—", l24: "—" };
 }
 
 // Simple EMA helper for MACD calculation.
@@ -421,6 +460,7 @@ function drawTable(list) {
     // Join pattern tags as small colored labels.
     var ph = r.patterns.map(function(p2){ return '<span class="tag '+p2.c+'">'+p2.n+'</span>'; }).join("");
 
+    var tr = document.createElement("tr");
     tr.innerHTML = '<td>' + (r.img ? '<img class="coin" src="'+r.img+'" />' : "") + r.name + '</td>' +
       '<td>$'+fmt(r.price)+'</td>' +
       '<td style="color:'+(r.chg>=0?"#4ade80":"#f87171")+'">'+r.chg.toFixed(2)+"%</td>" +
