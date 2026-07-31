@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>SMC Scanner — 2-Stage</title>
+<title>SMC Scanner — Full Analysis</title>
 <style>
   body { font-family: Arial, sans-serif; background: #1e1e2e; color: #e0e0e0; padding: 1rem; }
   h1 { color: #89b4fa; margin: 0 0 .5rem; }
@@ -34,7 +34,7 @@
 
   /* Sparkline chart inside table cell */
   .chart-cell { width: 140px; }
-  canvas.chart { display: block; margin: auto; border-radius: 6px; background: #2a2a3d; }
+  canvas.chart { display: block; margin: auto; border-radius: 6px; background: #2a2a3d; cursor: pointer; }
 
   /* Confidence bar */
   .bar-bg { background: #3a3a5c; height: 12px; border-radius: 6px; overflow: hidden; width: 80px; display: inline-block; vertical-align: middle; }
@@ -51,11 +51,50 @@
   .tag-bear { background: #f8717133; color: #f87171; }
 
   img.coin { width: 20px; vertical-align: middle; border-radius: 4px; }
+
+  /* ─── DETAIL PANEL (expanded analysis) ────────────── */
+  .detail-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,.7); z-index: 100; display: none; overflow-y: auto; }
+  .detail-panel { max-width: 960px; margin: 2rem auto; background: #1e1e2e; border-radius: 12px; padding: 2rem; position: relative; }
+  .close-btn { position: absolute; top: 1rem; right: 1.5rem; font-size: 1.5rem; cursor: pointer; color: #89b4fa; background: none; border: none; }
+  .detail-title { color: #89b4fa; font-size: 1.3rem; margin-bottom: 1rem; }
+
+  /* Tabs inside detail panel */
+  .tabs { display: flex; gap: .5rem; margin-bottom: 1rem; border-bottom: 2px solid #3a3a5c; padding-bottom: .5rem; }
+  .tab-btn { background: none; border: none; color: #a5b4fc; font-size: .9rem; cursor: pointer; padding: .5rem 1rem; border-radius: 6px 6px 0 0; }
+  .tab-btn.active { background: #2a2a3d; color: #89b4fa; }
+
+  /* Tab content */
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  /* Analysis sections inside tabs */
+  .section { margin-bottom: 1.5rem; padding: 1rem; background: #2a2a3d; border-radius: 8px; }
+  .section h3 { color: #89b4fa; margin-top: 0; font-size: 1rem; }
+  .section p, .section li { line-height: 1.6; }
+  .section ul { padding-left: 1.5rem; }
+
+  /* Links in analysis */
+  a { color: #89b4fa; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* Indicator values table inside detail panel */
+  .ind-table { width: 100%; border-collapse: collapse; margin-top: .5rem; }
+  .ind-table td, .ind-table th { padding: .4rem .6rem; border-bottom: 1px solid #3a3a5c; text-align: left; font-size: .85rem; }
+
+  /* Trade setup cards */
+  .setup-card { background: #2a2a3d; border-radius: 8px; padding: 1rem; margin-bottom: .5rem; border-left: 4px solid #89b4fa; }
+  .setup-card.long { border-left-color: #4ade80; }
+  .setup-card.short { border-left-color: #f87171; }
+
+  /* Market stats grid */
+  .market-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: .5rem; margin-top: .5rem; }
+  .mstat { background: #3a3a5c; padding: .6rem; border-radius: 6px; text-align: center; }
+  .mstat b { display: block; color: #89b4fa; font-size: .8rem; }
 </style>
 </head>
 <body>
 
-<h1>🔍 SMC Scanner — 2-Stage (Real Candles)</h1>
+<h1>🔍 SMC Scanner — Full Analysis</h1>
 <p id="status">Click Scan to find the movers.</p>
 
 <!-- ─── HEADER FILTERS ──────────────────────────────── -->
@@ -100,6 +139,34 @@
   <thead><tr><th>Coin</th><th>Price</th><th>24h %</th><th>Vol ($M)</th><th>RSI(14)</th><th>Chart</th><th>Patterns</th><th>Confidence</th><th>Prediction</th></tr></thead>
   <tbody id="rows"></tbody>
 </table>
+
+<!-- ─── DETAIL PANEL OVERLAY (hidden by default) ────── -->
+<div class="detail-overlay" id="overlay">
+  <div class="detail-panel">
+    <button class="close-btn" onclick="closeDetail()">✕</button>
+    <h2 class="detail-title" id="detailTitle"></h2>
+
+    <!-- Tabs: Overview | Analysis | Trade Setups | Market Data -->
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="overview">Overview</button>
+      <button class="tab-btn" data-tab="analysis">Technical Analysis</button>
+      <button class="tab-btn" data-tab="setups">Trade Setups</button>
+      <button class="tab-btn" data-tab="market">Market Data</button>
+    </div>
+
+    <!-- Tab: Overview -->
+    <div class="tab-content active" id="tab-overview"></div>
+
+    <!-- Tab: Technical Analysis (detailed) -->
+    <div class="tab-content" id="tab-analysis"></div>
+
+    <!-- Tab: Trade Setups -->
+    <div class="tab-content" id="tab-setups"></div>
+
+    <!-- Tab: Market Data / Links -->
+    <div class="tab-content" id="tab-market"></div>
+  </div>
+</div>
 
 <script>
 // Stablecoin name fragments to exclude from scanning.
@@ -239,26 +306,46 @@ function analyze(c, ohlc) {
       if (mom > 85 && chg > 0) pats.push({ n: "🟢 Strong Momentum", c: "tag-bull" });
       if (mom < 15 && chg < 0) pats.push({ n: "🔴 Weak Momentum", c: "tag-bear" });
     }
+
+    // ─── SUPPLEMENTARY INDICATORS from hourly data ──────
+    var atrVal = 0, stochK = 50, macdSignal = 0;
+    if (ohlc.length >= 24) {
+      // ATR(14): average true range of last 14 hourly candles.
+      var trSum = 0;
+      for (var i = ohlc.length - 14; i < ohlc.length; i++) {
+        var h = parseFloat(ohlc[i][2]), l = parseFloat(ohlc[i][3]);
+        var prevClose = parseFloat(ohlc[Math.max(0,i-1)][4]);
+        trSum += Math.max(h - l, Math.abs(h - prevClose), Math.abs(l - prevClose));
+      }
+      atrVal = trSum / 14;
+
+      // Stochastic %K: (close - lowN) / (highN - lowN).
+      var hN = Math.max.apply(null, ohlc.slice(-20).map(function(x){ return parseFloat(x[2]); }));
+      var lN = Math.min.apply(null, ohlc.slice(-20).map(function(x){ return parseFloat(x[3]); }));
+      stochK = (hN === lN) ? 50 : ((price - lN) / (hN - lN)) * 100;
+
+      // MACD proxy: EMA(9) vs EMA(26) of closes.
+      var ema9 = ema(ohlc, 9), ema26 = ema(ohlc, 26);
+      macdSignal = ((ema9 - ema26) / price) * 100; // normalized as % for readability.
+    }
+
+    return { name: c.name + " (" + c.symbol.toUpperCase() + ")", img: c.image || "", price: c.current_price, chg: chg, volM: volM, rsi: Math.round(rsi), patterns: pats, confidence: 0, pred: "neu", sparkData: ohlc.slice(-24).map(function(x){ return parseFloat(x[4]); }),
+             atr: atrVal.toFixed(3), stochK: Math.round(stochK), macdSignal: macdSignal.toFixed(1), h24: price.toFixed(4), l24: l24.toFixed(4) };
   }
 
-  // Score the setup: momentum + RSI extremes + pattern bonuses.
-  var score = chg * 0.5;
-  if (rsi < 30 && chg > 0)   score += 4; // oversold bounce — Scenario B!
-  if (rsi > 70 && chg < 0)   score -= 4; // overbought rejection.
-  pats.forEach(function(p2) { score += (p2.n.indexOf("Bull") !== -1 || p2.n === "Hammer") ? 3 : -3; });
+  // No candle data — return a neutral result so the coin still shows up.
+  return { name: c.name + " (" + c.symbol.toUpperCase() + ")", img: c.image || "", price: c.current_price, chg: chg, volM: volM, rsi: "—", patterns: [], confidence: 20, pred: "neu", sparkData: [], atr: "—", stochK: "—", macdSignal: "—", h24: "—", l24: "—" };
+}
 
-  var confidence = Math.min(100, Math.abs(score) * 7); // scale to 0-100%.
-
-  // Final prediction based on score strength and a confidence floor.
-  var pred, pcls;
-  if (score > 5 && confidence > 35)     { pred = "🟢 Bullish"; pcls = "bull"; }
-  else if (score < -5 && confidence > 35){ pred = "🔴 Bearish"; pcls = "bear"; }
-  else                                  { pred = "⚪ Neutral"; pcls = "neu"; }
-
-  // Extract the last 24 hourly prices for chart rendering.
-  var sparkData = ohlc ? ohlc.slice(-24).map(function(x){ return parseFloat(x[4]); }) : [];
-
-  return { name: c.name + " (" + c.symbol.toUpperCase() + ")", img: c.image || "", price: c.current_price, chg: chg, volM: volM, rsi: Math.round(rsi), patterns: pats, confidence: confidence, pred: pred, pcls: pcls, sparkData: sparkData };
+// Simple EMA helper for MACD calculation.
+function ema(data, period) {
+  var k = 2 / (period + 1);
+  var prevClose = parseFloat(data[data.length - period][4]); // SMA as initial value.
+  for (var i = data.length - period; i < data.length; i++) {
+    var c = parseFloat(data[i][4]);
+    prevClose = k * c + (1 - k) * prevClose;
+  }
+  return prevClose;
 }
 
 // Helper: unpack a candle [ts,o,h,l,c] into readable fields for pattern math.
@@ -270,13 +357,13 @@ function candle(k) {
 // Summary cards counting each prediction type.
 function drawStats(list) {
   var s = { bull: 0, bear: 0, neu: 0 };
-  list.forEach(function(r) { if (r.pcls === "bull") s.bull++; else if (r.pcls === "bear") s.bear++; else s.neu++; });
+  list.forEach(function(r) { if (r.pred === "bull") s.bull++; else if (r.pred === "bear") s.bear++; else s.neu++; });
   document.getElementById("stats").innerHTML = '<div class="card"><b>🟢 Bullish:</b> '+s.bull+'</div><div class="card"><b>🔴 Bearish:</b> '+s.bear+'</div><div class="card"><b>⚪ Neutral:</b> '+s.neu+'</div>';
 }
 
 // Draw a tiny sparkline chart on canvas for each coin.
 function drawChart(canvas, data, color) {
-  if (!data || !data.length) return; // nothing to draw.
+  if (!data || !data.length || canvas.width === 0) return; // nothing to draw.
 
   var w = canvas.width, h = canvas.height;
   var ctx = canvas.getContext("2d");
@@ -317,7 +404,7 @@ function drawTable(list) {
   tbody.innerHTML = "";
   list.forEach(function(r, idx) {
     var tr = document.createElement("tr");
-    var bc = r.pcls === "bull" ? "#4ade80" : r.pcls === "bear" ? "#f87171" : "#a5b4fc";
+    var bc = r.pred === "bull" ? "#4ade80" : r.pred === "bear" ? "#f87171" : "#a5b4fc";
 
     // Join pattern tags as small colored labels.
     var ph = r.patterns.map(function(p2){ return '<span class="tag '+p2.c+'">'+p2.n+'</span>'; }).join("");
@@ -329,7 +416,7 @@ function drawTable(list) {
       '<td class="chart-cell"><canvas id="c'+idx+'" class="chart" width="140" height="50"></canvas></td>' +
       '<td>'+(ph||"&#8212;")+'</td>' +
       '<td><div class="bar-bg"><div class="bar-fill" style="width:'+r.confidence+'%;background:'+bc+'"></div> '+Math.round(r.confidence)+"%</div></td>" +
-      '<td><span class="'+r.pcls+'">'+r.pred+'</span></td>';
+      '<td><span class="'+(r.pred==='bull'?'bull':r.pred==='bear'?'bear':'neu')+'">'+(r.pred==='bull'?"🟢 Bullish":r.pred==='bear'?"🔴 Bearish":"⚪ Neutral")+'</span></td>';
 
     tbody.appendChild(tr);
 
@@ -339,6 +426,185 @@ function drawTable(list) {
       drawChart(cvs, r.sparkData, bc);
     }
   });
+
+  // ─── Attach click handlers to canvas elements for detail panel ──
+  list.forEach(function(r, idx) {
+    var cvs = document.getElementById("c" + idx);
+    if (cvs) cvs.addEventListener("click", function(){ showDetail(list[idx], r); });
+  });
+}
+
+// ─── DETAIL PANEL: open overlay with tabs ──────────────
+function showDetail(coin, data) {
+  var ov = document.getElementById("overlay");
+  document.getElementById("detailTitle").textContent = coin.name + " (" + coin.symbol.toUpperCase() + ")";
+
+  // Populate Overview tab.
+  document.getElementById("tab-overview").innerHTML = buildOverview(data);
+
+  // Populate Technical Analysis tab.
+  document.getElementById("tab-analysis").innerHTML = buildAnalysis(data);
+
+  // Populate Trade Setups tab.
+  document.getElementById("tab-setups").innerHTML = buildSetups(data);
+
+  // Populate Market Data / Links tab.
+  document.getElementById("tab-market").innerHTML = buildMarket(data, coin);
+
+  ov.style.display = "block";
+}
+
+function closeDetail() {
+  document.getElementById("overlay").style.display = "none";
+}
+
+// Tab switching logic.
+document.addEventListener("click", function(e) {
+  if (e.target.classList.contains("tab-btn")) {
+    var tabId = e.target.getAttribute("data-tab");
+    // Deactivate all tabs and contents.
+    document.querySelectorAll(".tab-btn").forEach(function(b){ b.classList.remove("active"); });
+    document.querySelectorAll(".tab-content").forEach(function(c){ c.classList.remove("active"); });
+    // Activate clicked tab.
+    e.target.classList.add("active");
+    document.getElementById("tab-" + tabId).classList.add("active");
+  }
+});
+
+// ─── TAB CONTENT BUILDERS ──────────────────────────────
+
+function buildOverview(d) {
+  return '<div class="section"><h3>📊 Quick Overview</h3>' +
+    '<table class="ind-table">' +
+    '<tr><td>Current Price</td><td>$' + fmt(d.price) + '</td></tr>' +
+    '<tr><td>24h Change</td><td style="color:'+(d.chg>=0?"#4ade80":"#f87171")+'">' + d.chg.toFixed(2) + '%</td></tr>' +
+    '<tr><td>RSI (14)</td><td>' + d.rsi + '</td></tr>' +
+    '<tr><td>ATR (14 hourly)</td><td>$' + d.atr + '</td></tr>' +
+    '<tr><td>Stochastic %K</td><td>' + d.stochK + '%</td></tr>' +
+    '<tr><td>MACD Signal</td><td>' + d.macdSignal + '%</td></tr>' +
+    '</table></div>';
+}
+
+function buildAnalysis(d) {
+  var html = '<div class="section"><h3>📈 Technical Indicators Summary</h3>';
+
+  // RSI interpretation.
+  if (typeof d.rsi === "number") {
+    var rsiNote = "";
+    if (d.rsi < 30)       rsiNote = "⬇️ Oversold — potential bounce setup.";
+    else if (d.rsi > 70)  rsiNote = "⬆️ Overbought — watch for rejection.";
+    else                  rsiNote = "➡️ Neutral zone — no extreme momentum.";
+    html += '<p><b>RSI(14):</b> ' + d.rsi + ' — ' + rsiNote + '</p>';
+  }
+
+  // Stochastic interpretation.
+  if (typeof d.stochK === "number") {
+    var stochNote = "";
+    if (d.stochK < 20)      stochNote = "⬇️ Deep oversold — reversal potential.";
+    else if (d.stochK > 80) stochNote = "⬆️ Overbought — pullback risk.";
+    else                    stochNote = "➡️ Normal range.";
+    html += '<p><b>Stochastic %K:</b> ' + d.stochK + '% — ' + stochNote + '</p>';
+  }
+
+  // MACD interpretation.
+  if (typeof d.macdSignal === "number") {
+    var macdNote = "";
+    if (d.macdSignal > 0)   macdNote = "🟢 Bullish momentum — EMA(9) above EMA(26).";
+    else                    macdNote = "🔴 Bearish momentum — EMA(9) below EMA(26).";
+    html += '<p><b>MACD (EMA 9 vs 26):</b> ' + d.macdSignal.toFixed(1) + '% — ' + macdNote + '</p>';
+  }
+
+  // ATR interpretation.
+  if (typeof d.atr === "number") {
+    var atrPct = ((parseFloat(d.atr) / parseFloat(d.price)) * 100).toFixed(1);
+    html += '<p><b>ATR(14):</b> $' + d.atr + ' (~' + atrPct + '% of price) — ' + (atrPct > 2 ? "High volatility, wider SL needed." : "Low volatility, tight SL possible.") + '</p>';
+  }
+
+  // Pattern summary.
+  html += '<h3>🕯️ Detected Patterns</h3><ul>';
+  if (d.patterns.length === 0) {
+    html += '<li>No reversal patterns detected in the last 2 candles.</li>';
+  } else {
+    d.patterns.forEach(function(p) {
+      html += '<li class="' + p.c.replace("tag-","") + '">' + p.n + '</li>';
+    });
+  }
+  html += '</ul></div>';
+
+  // SMC context.
+  html += '<div class="section"><h3>🎯 SMC Context</h3><p>' +
+    (d.chg > 5 ? "Strong bullish momentum — watch for pullback entry at support." : "") +
+    (d.chg < -5 ? "Strong bearish pressure — watch for bounce entry at support or continuation short." : "") +
+    "</p></div>";
+
+  return html;
+}
+
+function buildSetups(d) {
+  var html = '<h3>📋 Potential Trade Setups</h3>';
+
+  // Long setup conditions.
+  if (d.chg > 0 && typeof d.rsi === "number" && d.rsi < 40) {
+    var slLong = fmt(parseFloat(d.price) - parseFloat(d.atr));
+    html += '<div class="setup-card long"><h3>🟢 Long Setup — Oversold Bounce</h3>' +
+      '<p><b>Entry:</b> Retest of support ($' + d.l24 + ' or lower)</p>' +
+      '<p><b>Stop Loss:</b> $' + slLong + '</p>' +
+      '<p><b>TP1:</b> $' + fmt(parseFloat(d.price) * 1.03) + ' (3%)</p>' +
+      '<p><b>TP2:</b> $' + fmt(parseFloat(d.price) * 1.06) + ' (6%)</p>' +
+      '<p><b>Rationale:</b> RSI oversold at ' + d.rsi + ', potential bounce back toward mean.</p></div>';
+  }
+
+  // Short setup conditions.
+  if (d.chg < 0 && typeof d.rsi === "number" && d.rsi > 65) {
+    var slShort = fmt(parseFloat(d.price) + parseFloat(d.atr));
+    html += '<div class="setup-card short"><h3>🔴 Short Setup — Overbought Rejection</h3>' +
+      '<p><b>Entry:</b> Retest of resistance ($' + d.h24 + ' or higher)</p>' +
+      '<p><b>Stop Loss:</b> $' + slShort + '</p>' +
+      '<p><b>TP1:</b> $' + fmt(parseFloat(d.price) * 0.97) + ' (3%)</p>' +
+      '<p><b>TP2:</b> $' + fmt(parseFloat(d.price) * 0.94) + ' (6%)</p>' +
+      '<p><b>Rationale:</b> RSI overbought at ' + d.rsi + ', potential rejection.</p></div>';
+  }
+
+  // Breakout setup.
+  if (d.chg > 5 && typeof d.macdSignal === "number" && d.macdSignal > 0) {
+    html += '<div class="setup-card long"><h3>🚀 Breakout Continuation</h3>' +
+      '<p><b>Entry:</b> Above $' + d.h24 + ' with volume confirmation.</p>' +
+      '<p><b>Stop Loss:</b> Below $' + fmt(parseFloat(d.price) - parseFloat(d.atr)) + '</p>' +
+      '<p><b>Rationale:</b> Strong momentum with bullish MACD — trend continuation play.</p></div>';
+  }
+
+  // No setups message.
+  if (html.indexOf("setup-card") === -1) {
+    html += '<p>No clear setup detected right now. Wait for a confirmed pattern or RSI extreme before entering.</p>';
+  }
+
+  return html;
+}
+
+function buildMarket(d, coin) {
+  var html = '<div class="section"><h3>🌐 Trading & Links</h3><ul>' +
+    // CoinGecko link.
+    '<li><a href="https://www.coingecko.com/en/coins/' + coin.id + '" target="_blank">CoinGecko — ' + coin.name + '</a></li>' +
+    // CoinMarketCap link (if available).
+    '<li><a href="https://coinmarketcap.com/currencies/' + (coin.symbol || "").toLowerCase() + '/" target="_blank">CoinMarketCap</a></li>' +
+    // DexScreener link.
+    '<li><a href="https://dexscreener.com/?search=' + (coin.symbol || "").toUpperCase() + '" target="_blank">DexScreener — DEX pairs</a></li>';
+
+  if (coin.homepage) html += '<li><b>Official Website:</b> <a href="' + coin.homepage[0] + '" target="_blank">' + coin.homepage[0] + '</a></li>';
+  if (coin.twitter_screen_name) html += '<li><b>Twitter/X:</b> <a href="https://twitter.com/' + coin.twitter_screen_name + '" target="_blank">@' + coin.twitter_screen_name + '</a></li>';
+
+  html += '</ul></div>';
+
+  // Market stats.
+  html += '<div class="section"><h3>📊 Market Stats</h3><div class="market-grid">' +
+    '<div class="mstat"><b>Current Price</b>$' + fmt(d.price) + '</div>' +
+    '<div class="mstat"><b>24h High</b>$' + d.h24 + '</div>' +
+    '<div class="mstat"><b>24h Low</b>$' + d.l24 + '</div>' +
+    '<div class="mstat"><b>24h Volume</b>$' + d.volM.toFixed(1) + 'M</div>' +
+    '<div class="mstat"><b>ATH Distance</b>' + ((d.price - coin.ath || 0) / (coin.ath || 1) * 100).toFixed(1) + '%</div>' +
+    '</div></div>';
+
+  return html;
 }
 
 function fmt(n) { return n >= 1000 ? (n/1000).toFixed(1)+"K" : n < 0.01 ? n.toFixed(6) : n.toFixed(4); }
