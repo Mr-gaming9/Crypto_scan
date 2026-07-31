@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>SMC Scanner — No Proxies</title>
+<title>SMC Scanner — 2-Stage</title>
 <style>
   body { font-family: Arial, sans-serif; background: #1e1e2e; color: #e0e0e0; padding: 1rem; }
   h1 { color: #89b4fa; margin: 0 0 .5rem; }
@@ -50,8 +50,8 @@
 </head>
 <body>
 
-<h1>🔍 SMC Scanner — Single Source, No Proxies</h1>
-<p id="status">Click Scan (CoinGecko only — CORS-friendly).</p>
+<h1>🔍 SMC Scanner — 2-Stage (Real Candles)</h1>
+<p id="status">Click Scan. Stage 2 fetches hourly candles per coin.</p>
 
 <!-- Tunable mover threshold -->
 <div class="panel">
@@ -65,12 +65,12 @@
 <div id="debug"></div>
 <div class="stats" id="stats"></div>
 <table>
-  <thead><tr><th>Coin</th><th>Price</th><th>24h %</th><th>Vol ($M)</th><th>Momentum</th><th>Patterns</th><th>Confidence</th><th>Prediction</th></tr></thead>
+  <thead><tr><th>Coin</th><th>Price</th><th>24h %</th><th>Vol ($M)</th><th>RSI(14)</th><th>Patterns</th><th>Confidence</th><th>Prediction</th></tr></thead>
   <tbody id="rows"></tbody>
 </table>
 
 <script>
-// Stablecoin names to exclude — they don't move, so no setups exist.
+// Stablecoin name fragments to exclude from scanning.
 var STABLES = ["dollar","usdt","usdc","busd","tusd","dai","frax","fdusd"];
 
 async function run() {
@@ -79,47 +79,53 @@ async function run() {
   var dbg = document.getElementById("debug");
   btn.disabled = true;
 
-  // ─── STAGE 1: one call gives us stats + hourly sparkline prices ──
-  // "sparkline=7d" adds an array of the last 7 days of prices (hourly points).
-  // This endpoint allows browser requests — no proxy or CORS issues.
-  st.textContent = "Fetching movers with price history...";
+  // ─── STAGE 1: gross pick — fast overview of top 250 coins ──
+  st.textContent = "Stage 1: fetching movers...";
   var data = null;
 
-  // Retry up to 3 times in case CoinGecko rate-limits us temporarily.
-  for (var a = 1; a <= 3; a++) {
+  // Retry up to 3 times with a delay — handles rate limits gracefully.
+  for (var a = 1; a <= 3 && !data; a++) {
     try {
-      var r = await fetch("https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=1&sparkline=7d");
-      if (r.ok) { data = await r.json(); break; } // success — exit loop
+      var r = await fetch("https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=1");
+      if (r.ok) data = await r.json();
     } catch(e) {}
-    await new Promise(function(ok){ setTimeout(ok, 10000); }); // wait 10s between retries
+    if (!data && a < 3) await new Promise(function(ok){ setTimeout(ok, 10000); });
   }
 
-  // All retries failed — show a clear message.
-  if (!data || !Array.isArray(data)) {
-    st.textContent = "❌ CoinGecko unavailable after 3 tries. Wait a few minutes.";
-    btn.disabled = true;
-    return;
-  }
+  if (!data || !Array.isArray(data)) { st.textContent = "❌ CoinGecko unavailable after 3 tries."; btn.disabled = false; return; }
 
   var mThresh = parseFloat(document.getElementById("fM").value);
 
-  // Keep only coins that moved enough and aren't stablecoins.
+  // Keep only non-stablecoins that moved enough.
   var movers = data.filter(function(c) {
     var name = c.name.toLowerCase();
     for (var i = 0; i < STABLES.length; i++) if (name.indexOf(STABLES[i]) !== -1) return false;
     return Math.abs(parseFloat(c.price_change_percentage_24h || 0)) >= mThresh;
   });
 
-  // Debug: shows exactly how many coins survived the filter.
-  dbg.textContent = "Fetched " + data.length + " coins → " + movers.length + " movers (threshold " + mThresh + "%)";
+  // Sort biggest movers first, cap at 15 so Stage 2 stays fast.
+  movers.sort(function(a, b) { return Math.abs(parseFloat(b.price_change_percentage_24h||0)) - Math.abs(parseFloat(a.price_change_percentage_24h||0)); });
+  var top = movers.slice(0, 15);
 
-  if (!movers.length) { st.textContent = "No movers — lower threshold."; btn.disabled = false; return; }
+  dbg.textContent = "Stage 1: fetched " + data.length + " coins → " + top.length + " movers selected for deep analysis.";
 
-  // Sort by movement size so biggest plays appear first, cap at 20.
-  movers.sort(function(a, b) { return Math.abs(parseFloat(b.price_change_percentage_24h)) - Math.abs(parseFloat(a.price_change_percentage_24h)); });
+  // ─── STAGE 2: technical analysis — real hourly candles per coin ──
+  st.textContent = "Stage 2: analyzing candles...";
+  var results = [];
 
-  // Analyze each mover using its sparkline history (no extra API calls needed).
-  var results = movers.slice(0, 20).map(analyze);
+  for (var i = 0; i < top.length; i++) {
+    st.textContent = "Stage 2: " + (i+1) + "/" + top.length + " — " + top[i].name;
+
+    // OHLC endpoint returns hourly candlesticks as arrays of [timestamp, open, high, low, close].
+    var ohlc = null;
+    try {
+      var r2 = await fetch("https://api.coingecko.com/api/v3/coin/" + top[i].id + "/ohlc?vs_currency=usd");
+      if (r2.ok) ohlc = await r2.json(); // array of [ts, o, h, l, c] rows
+    } catch(e) {}
+
+    results.push(analyze(top[i], ohlc)); // Stage 3: RSI + patterns + prediction.
+    await new Promise(function(ok){ setTimeout(ok, 600); }); // small pause between calls to stay polite to the API.
+  }
 
   // Sort by confidence so best setups rise to the top.
   results.sort(function(a, b) { return b.confidence - a.confidence; });
@@ -129,84 +135,76 @@ async function run() {
   btn.disabled = false;
 }
 
-// ─── STAGE 2: pattern detection from hourly sparkline data ──
-function analyze(c) {
+// ─── STAGE 3: RSI + hammer/engulfing detection + prediction ──
+function analyze(c, ohlc) {
   var chg   = parseFloat(c.price_change_percentage_24h || 0); // 24h change %
   var volM  = (parseFloat(c.total_volume || c.volume || 0)) / 1e6; // volume in millions
 
-  var pats = [];
-  var spark = c.sparkline_in_7d?.price; // array of hourly prices over ~7 days
+  var rsi = 50, pats = []; // defaults if candle data is missing.
 
-  // ─── MOMENTUM ANALYSIS from the last 24 price points (hourly) ──
-  if (spark && spark.length >= 24) {
-    var recent = spark.slice(-24);   // last 24 hours of prices
-    var older  = spark.slice(-48, -24); // 24h before that (for comparison)
+  // Only run pattern detection when we actually got candles back.
+  if (ohlc && ohlc.length >= 30) {
+    // Compute RSI(14) from hourly closes: average gain vs average loss over last 14 bars.
+    var gains = 0, losses = 0;
+    for (var i = ohlc.length - 14; i < ohlc.length; i++) {
+      var d = parseFloat(ohlc[i][4]) - parseFloat(ohlc[Math.max(0,i-1)][4]); // close minus prior close.
+      if (d > 0) gains += d; else losses -= d;
+    }
+    var ag = gains / 14, al = losses / 14;
+    rsi = al === 0 ? 100 : 100 - (100 / (1 + ag / al)); // standard RSI formula.
 
-    // Average price in each window so we can measure trend direction.
-    var avgNow = recent.reduce(function(s,v){ return s+v; }, 0) / recent.length;
-    var avgThen = older.reduce(function(s,v){ return s+v; }, 0) / older.length;
+    // Check the last two candles for reversal patterns.
+    var k = candle(ohlc[ohlc.length - 1]); // current candle.
+    var p = candle(ohlc[ohlc.length - 2]); // previous candle.
 
-    // High and low of the last 24h — needed for sweep detection.
-    var h24 = Math.max.apply(null, recent);
-    var l24 = Math.min.apply(null, recent);
-    var price = recent[recent.length - 1]; // current price (last point)
-
-    // ─── SWEEP DETECTION (SMC concept) ──────────────────────
-    // Bullish sweep: price dropped below the earlier average then bounced back above it.
-    // Interpretation: stop hunt → reversal → Scenario B setup!
-    if (l24 < avgThen && price > avgNow && chg > 0) {
-      pats.push({ n: "🔵 Bull Sweep", c: "tag-bull" });
+    // Hammer: green close, long lower wick (at least 2x the body), short upper wick — bullish reversal sign.
+    if (k.green && k.body > 0 && k.lw >= 2 * k.body && k.uw < k.lw) {
+      pats.push({ n: "Hammer", c: "tag-bull" });
     }
 
-    // Bearish sweep: price pumped above the earlier average then faded back below it.
-    if (h24 > avgThen && price < avgNow && chg < 0) {
-      pats.push({ n: "🔴 Bear Sweep", c: "tag-bear" });
+    // Bullish engulfing: prior red candle fully swallowed by current green one.
+    if (k.green && !p.green && k.body > p.body && k.open < p.close && k.cl > p.open) {
+      pats.push({ n: "Bull Engulf", c: "tag-bull" });
     }
 
-    // ─── TREND FLAGS ────────────────────────────────────────
-    // Price climbing and holding near the 24h high = strong momentum (BOS continuation).
-    if (price > h24 * 0.97 && chg > 5) {
-      pats.push({ n: "🟢 Momentum", c: "tag-bull" });
+    // Bearish inverted hammer: red candle with long upper wick — exhaustion at top.
+    if (!k.green && k.body > 0 && k.uw >= 2 * k.body) {
+      pats.push({ n: "Inv Hammer", c: "tag-bear" });
     }
 
-    // Price falling and sitting near the 24h low = weak, sellers in control.
-    if (price < l24 * 1.03 && chg < -5) {
-      pats.push({ n: "🔴 Weak", c: "tag-bear" });
-    }
+    // ─── SWEEP DETECTION from hourly high/low ──────────────
+    var h24 = Math.max.apply(null, ohlc.slice(-24).map(function(x){ return parseFloat(x[2]); })); // 24h high.
+    var l24 = Math.min.apply(null, ohlc.slice(-24).map(function(x){ return parseFloat(x[3]); })); // 24h low.
+    var price = parseFloat(ohlc[ohlc.length - 1][4]); // current close.
 
-    // ─── RSI-STYLE MOMENTUM (simplified, from price steps) ──
-    // Count how many of the last 12 hourly points went up vs down.
-    var ups = 0;
-    for (var i = recent.length - 12; i < recent.length; i++) {
-      if (recent[i] > recent[i-1]) ups++;
-    }
-    var rsiProxy = (ups / 12) * 100; // rough RSI stand-in: 0 = all down, 100 = all up
-
-    // Oversold bounce: momentum was bearish but price just turned green — Scenario B!
-    if (rsiProxy < 35 && chg > 0) pats.push({ n: "🔵 Oversold Bounce", c: "tag-bull" });
-    // Overbought fade: strong run but now turning red.
-    if (rsiProxy > 75 && chg < 0) pats.push({ n: "🔴 Overbought Fade", c: "tag-bear" });
-
-    // ─── SCORING & PREDICTION ──────────────────────────────
-    var score = chg * 0.5; // base momentum score
-    pats.forEach(function(p2) {
-      var s = (p2.n.indexOf("Bull") !== -1 || p2.n.indexOf("🟢") !== -1) ? 3 : -3;
-      score += s;
-    });
-
-    var confidence = Math.min(100, Math.abs(score) * 7); // scale to 0-100%
-
-    // Final prediction based on score strength and a confidence floor.
-    var pred, pcls;
-    if (score > 5 && confidence > 35)     { pred = "🟢 Bullish"; pcls = "bull"; }
-    else if (score < -5 && confidence > 35){ pred = "🔴 Bearish"; pcls = "bear"; }
-    else                                  { pred = "⚪ Neutral"; pcls = "neu"; }
-
-    return { name: c.name + " (" + c.symbol.toUpperCase() + ")", img: c.image || "", price: c.current_price, chg: chg, volM: volM, rsi: Math.round(rsiProxy), patterns: pats, confidence: confidence, pred: pred, pcls: pcls };
+    // Bullish sweep: price dipped below the 48h average then recovered above it — stop hunt reversal.
+    if (l24 < ohlc[-49]) { /* simplified check below */ }
+    var older = parseFloat(ohlc[ohlc.length - 48][4]); // close from 48h ago as baseline.
+    if (l24 < older && price > older && chg > 0) pats.push({ n: "🔵 Bull Sweep", c: "tag-bull" });
+    if (h24 > older && price < older && chg < 0) pats.push({ n: "🔴 Bear Sweep", c: "tag-bear" });
   }
 
-  // No sparkline data — return a neutral result so the coin still shows up.
-  return { name: c.name + " (" + c.symbol.toUpperCase() + ")", img: c.image || "", price: c.current_price, chg: chg, volM: volM, rsi: "—", patterns: [], confidence: 20, pred: "⚪ No history", pcls: "neu" };
+  // Score the setup: momentum + RSI extremes + pattern bonuses.
+  var score = chg * 0.5;
+  if (rsi < 30 && chg > 0)   score += 4; // oversold bounce — Scenario B!
+  if (rsi > 70 && chg < 0)   score -= 4; // overbought rejection.
+  pats.forEach(function(p2) { score += (p2.n.indexOf("Bull") !== -1 || p2.n === "Hammer") ? 3 : -3; });
+
+  var confidence = Math.min(100, Math.abs(score) * 7); // scale to 0-100%.
+
+  // Final prediction based on score strength and a confidence floor.
+  var pred, pcls;
+  if (score > 5 && confidence > 35)     { pred = "🟢 Bullish"; pcls = "bull"; }
+  else if (score < -5 && confidence > 35){ pred = "🔴 Bearish"; pcls = "bear"; }
+  else                                  { pred = "⚪ Neutral"; pcls = "neu"; }
+
+  return { name: c.name + " (" + c.symbol.toUpperCase() + ")", img: c.image || "", price: c.current_price, chg: chg, volM: volM, rsi: Math.round(rsi), patterns: pats, confidence: confidence, pred: pred, pcls: pcls };
+}
+
+// Helper: unpack a candle [ts,o,h,l,c] into readable fields for pattern math.
+function candle(k) {
+  var o = parseFloat(k[1]), h = parseFloat(k[2]), l = parseFloat(k[3]), cl = parseFloat(k[4]);
+  return { open: o, cl: cl, green: cl > o, body: Math.abs(cl - o), lw: Math.min(o,cl) - l, uw: h - Math.max(o,cl) };
 }
 
 // Summary cards counting each prediction type.
