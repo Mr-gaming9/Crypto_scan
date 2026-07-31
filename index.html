@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>SMC Scanner — Binance Candles</title>
+<title>SMC Scanner — Binance + CORS Proxy</title>
 <style>
   body { font-family: Arial, sans-serif; background: #1e1e2e; color: #e0e0e0; padding: 1rem; }
   h1 { color: #89b4fa; margin: 0 0 .5rem; }
@@ -97,7 +97,7 @@
 </head>
 <body>
 
-<h1>🔍 SMC Scanner — Binance Candles (Real Data)</h1>
+<h1>🔍 SMC Scanner — Binance Candles (CORS Proxy)</h1>
 <p id="status">Click Scan to find the movers.</p>
 
 <!-- ─── HEADER FILTERS ──────────────────────────────── -->
@@ -175,6 +175,9 @@
 // Stablecoin name fragments to exclude from scanning.
 var STABLES = ["dollar","usdt","usdc","busd","tusd","dai","frax","fdusd"];
 
+// CORS proxy — Binance blocks browser requests directly, so we route through one.
+var PROXY_URL = "https://corsproxy.io/?"; // free public proxy that works from GitHub Pages.
+
 var DEBUG_LOG = []; // collect all debug messages for display.
 
 function log(msg, isError) {
@@ -230,21 +233,21 @@ async function run() {
 
   log("Stage 1: " + data.length + " coins → " + top.length + " selected for deep analysis", false);
 
-  // ─── STAGE 2: technical analysis — real hourly candles from Binance ──
-  st.textContent = "Stage 2: fetching candle data (Binance)...";
+  // ─── STAGE 2: technical analysis — real hourly candles from Binance via CORS proxy ──
+  st.textContent = "Stage 2: fetching candle data (Binance via proxy)...";
   var results = [];
 
   for (var i = 0; i < top.length; i++) {
     log("Stage 2: fetching OHLC for #" + (i+1) + "/" + top.length + " — " + top[i].name + " (" + top[i].id + ")", false);
 
     // Binance klines endpoint returns [timestamp, open, high, low, close, volume] arrays.
-    // We map the CoinGecko symbol to a Binance USDT pair (e.g., MANTIS → MANTISUSDT).
     var sym = (top[i].symbol || "").toUpperCase() + "USDT";
-    log("  Calling Binance /api/v3/klines?symbol=" + sym + "&interval=1h&limit=50", false);
+    log("  Calling Binance via proxy: /api/v3/klines?symbol=" + sym + "&interval=1h&limit=50", false);
 
     var ohlc = null;
     try {
-      var r2 = await fetch("https://api.binance.com/api/v3/klines?symbol=" + sym + "&interval=1h&limit=50");
+      // Route through CORS proxy so the browser can reach Binance.
+      var r2 = await fetch(PROXY_URL + encodeURIComponent("https://api.binance.com/api/v3/klines?symbol=" + sym + "&interval=1h&limit=50"));
       if (r2.ok) {
         ohlc = await r2.json(); // array of [ts, o, h, l, c, v] arrays.
         log("  Binance returned: " + (ohlc ? ohlc.length + " candles" : "null"), false);
@@ -396,10 +399,14 @@ function candle(k) {
   return { open: o, cl: cl, green: cl > o, body: Math.abs(cl - o), lw: Math.min(o,cl) - l, uw: h - Math.max(o,cl) };
 }
 
-// Summary cards counting each prediction type.
+// Summary cards counting each prediction type — FIXED: called AFTER drawTable sets pred.
 function drawStats(list) {
   var s = { bull: 0, bear: 0, neu: 0 };
-  list.forEach(function(r) { if (r.pred === "bull") s.bull++; else if (r.pred === "bear") s.bear++; else s.neu++; });
+  list.forEach(function(r) {
+    if (r.pred === "bull") s.bull++;
+    else if (r.pred === "bear") s.bear++;
+    else s.neu++; // includes both explicitly neutral AND any with pred=null.
+  });
   document.getElementById("stats").innerHTML = '<div class="card"><b>🟢 Bullish:</b> '+s.bull+'</div><div class="card"><b>🔴 Bearish:</b> '+s.bear+'</div><div class="card"><b>⚪ Neutral:</b> '+s.neu+'</div>';
 }
 
