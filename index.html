@@ -245,6 +245,7 @@ function analyze(c, ohlc) {
   var volM  = (parseFloat(c.total_volume || c.volume || 0)) / 1e6; // volume in millions
 
   var rsi = 50, pats = []; // defaults if candle data is missing.
+  var atrVal = 0, stochK = 50, macdSignal = 0;
 
   // Only run pattern detection when we actually got candles back.
   if (ohlc && ohlc.length >= 30) {
@@ -308,37 +309,33 @@ function analyze(c, ohlc) {
     }
 
     // ─── SUPPLEMENTARY INDICATORS from hourly data ──────
-    var atrVal = 0, stochK = 50, macdSignal = 0;
-    if (ohlc.length >= 24) {
-      // ATR(14): average true range of last 14 hourly candles.
-      var trSum = 0;
-      for (var i = ohlc.length - 14; i < ohlc.length; i++) {
-        var h = parseFloat(ohlc[i][2]), l = parseFloat(ohlc[i][3]);
-        var prevClose = parseFloat(ohlc[Math.max(0,i-1)][4]);
-        trSum += Math.max(h - l, Math.abs(h - prevClose), Math.abs(l - prevClose));
-      }
-      atrVal = trSum / 14;
-
-      // Stochastic %K: (close - lowN) / (highN - lowN).
-      var hN = Math.max.apply(null, ohlc.slice(-20).map(function(x){ return parseFloat(x[2]); }));
-      var lN = Math.min.apply(null, ohlc.slice(-20).map(function(x){ return parseFloat(x[3]); }));
-      stochK = (hN === lN) ? 50 : ((price - lN) / (hN - lN)) * 100;
-
-      // MACD proxy: EMA(9) vs EMA(26) of closes.
-      var ema9 = ema(ohlc, 9), ema26 = ema(ohlc, 26);
-      macdSignal = ((ema9 - ema26) / price) * 100; // normalized as % for readability.
+    var atrSum = 0;
+    for (var i = ohlc.length - 14; i < ohlc.length; i++) {
+      var h = parseFloat(ohlc[i][2]), l = parseFloat(ohlc[i][3]);
+      var prevClose = parseFloat(ohlc[Math.max(0,i-1)][4]);
+      atrSum += Math.max(h - l, Math.abs(h - prevClose), Math.abs(l - prevClose));
     }
+    atrVal = atrSum / 14;
 
-    return { name: c.name + " (" + c.symbol.toUpperCase() + ")", img: c.image || "", price: c.current_price, chg: chg, volM: volM, rsi: Math.round(rsi), patterns: pats, confidence: 0, pred: "neu", sparkData: ohlc.slice(-24).map(function(x){ return parseFloat(x[4]); }),
+    // Stochastic %K: (close - lowN) / (highN - lowN).
+    var hN = Math.max.apply(null, ohlc.slice(-20).map(function(x){ return parseFloat(x[2]); }));
+    var lN = Math.min.apply(null, ohlc.slice(-20).map(function(x){ return parseFloat(x[3]); }));
+    stochK = (hN === lN) ? 50 : ((price - lN) / (hN - lN)) * 100;
+
+    // MACD proxy: EMA(9) vs EMA(26) of closes.
+    var ema9 = emaCalc(ohlc, 9), ema26 = emaCalc(ohlc, 26);
+    macdSignal = ((ema9 - ema26) / price) * 100; // normalized as % for readability.
+
+    return { name: c.name + " (" + c.symbol.toUpperCase() + ")", img: c.image || "", price: c.current_price, chg: chg, volM: volM, rsi: Math.round(rsi), patterns: pats, confidence: 0, pred: null, sparkData: ohlc.slice(-24).map(function(x){ return parseFloat(x[4]); }),
              atr: atrVal.toFixed(3), stochK: Math.round(stochK), macdSignal: macdSignal.toFixed(1), h24: price.toFixed(4), l24: l24.toFixed(4) };
   }
 
   // No candle data — return a neutral result so the coin still shows up.
-  return { name: c.name + " (" + c.symbol.toUpperCase() + ")", img: c.image || "", price: c.current_price, chg: chg, volM: volM, rsi: "—", patterns: [], confidence: 20, pred: "neu", sparkData: [], atr: "—", stochK: "—", macdSignal: "—", h24: "—", l24: "—" };
+  return { name: c.name + " (" + c.symbol.toUpperCase() + ")", img: c.image || "", price: c.current_price, chg: chg, volM: volM, rsi: "—", patterns: [], confidence: 20, pred: null, sparkData: [], atr: "—", stochK: "—", macdSignal: "—", h24: "—", l24: "—" };
 }
 
 // Simple EMA helper for MACD calculation.
-function ema(data, period) {
+function emaCalc(data, period) {
   var k = 2 / (period + 1);
   var prevClose = parseFloat(data[data.length - period][4]); // SMA as initial value.
   for (var i = data.length - period; i < data.length; i++) {
@@ -363,7 +360,7 @@ function drawStats(list) {
 
 // Draw a tiny sparkline chart on canvas for each coin.
 function drawChart(canvas, data, color) {
-  if (!data || !data.length || canvas.width === 0) return; // nothing to draw.
+  if (!data || !data.length) return; // nothing to draw.
 
   var w = canvas.width, h = canvas.height;
   var ctx = canvas.getContext("2d");
@@ -403,7 +400,22 @@ function drawTable(list) {
   var tbody = document.getElementById("rows");
   tbody.innerHTML = "";
   list.forEach(function(r, idx) {
-    var tr = document.createElement("tr");
+    // Compute real prediction based on score logic (moved from analyze so we have all data).
+    var score = r.chg * 0.5;
+    if (typeof r.rsi === "number") {
+      if (r.rsi < 30 && r.chg > 0)   score += 4; // oversold bounce — Scenario B!
+      if (r.rsi > 70 && r.chg < 0)   score -= 4; // overbought rejection.
+    }
+    r.patterns.forEach(function(p2) { score += (p2.n.indexOf("Bull") !== -1 || p2.n === "Hammer") ? 3 : -3; });
+
+    var confidence = Math.min(100, Math.abs(score) * 7); // scale to 0-100%.
+    r.confidence = confidence;
+
+    // Final prediction based on score strength and a confidence floor.
+    if (score > 5 && confidence > 35)     { r.pred = "bull"; }
+    else if (score < -5 && confidence > 35){ r.pred = "bear"; }
+    else                                  { r.pred = "neu"; }
+
     var bc = r.pred === "bull" ? "#4ade80" : r.pred === "bear" ? "#f87171" : "#a5b4fc";
 
     // Join pattern tags as small colored labels.
@@ -430,7 +442,7 @@ function drawTable(list) {
   // ─── Attach click handlers to canvas elements for detail panel ──
   list.forEach(function(r, idx) {
     var cvs = document.getElementById("c" + idx);
-    if (cvs) cvs.addEventListener("click", function(){ showDetail(list[idx], r); });
+    if (cvs && cvs.width > 0) cvs.addEventListener("click", function(){ showDetail(list[idx], r); });
   });
 }
 
